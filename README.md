@@ -8,7 +8,8 @@ Displays real-time environmental data with a clean dashboard and historical grap
 ## 📸 Screenshots
 
 *(Add your images here)*
-
+![Dashboard](images/dashboard.jpg)
+![Graph](images/graph.jpg)
 ### Dashboard View
 
 ![Dashboard](images/dashboard.jpg)
