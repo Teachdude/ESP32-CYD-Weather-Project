@@ -1,13 +1,13 @@
 # ESP32 CYD Weather Station (v5.14)
 
-A fast, lightweight weather station built for the **ESP32-2432S028 (CYD display)**.
-Displays real-time environmental data with a clean dashboard and historical graphing.
+A lightweight, high-performance weather station built for the **ESP32-2432S028 (CYD display)**.
+This project focuses on clean UI, smooth graphing, and reliable operation while teaching beginners how to configure the TFT_eSPI library for custom ESP32 displays.
 
 ---
 
 ## 📸 Screenshots
 
-*(Add your images here)*
+*(Add your images here after uploading them to `images/`)*
 
 ### Dashboard View
 
@@ -16,6 +16,10 @@ Displays real-time environmental data with a clean dashboard and historical grap
 ### Graph View
 
 ![Graph](images/graph.jpg)
+
+### Hardware Setup
+
+![Setup](images/setup.jpg)
 
 ---
 
@@ -31,13 +35,13 @@ Displays real-time environmental data with a clean dashboard and historical grap
 * Dual display modes:
 
   * Dashboard view
-  * Graph view (historical data)
-* Fast and smooth UI updates
-* Optimized for long-term stability
+  * Graph view
+* Optimized for long-term stability:
 
   * No dynamic `String` usage
-  * Uses fixed buffers (`snprintf`)
+  * Fixed buffers (`snprintf`)
   * NaN sensor protection
+* Configurable TFT_eSPI setup for CYD displays
 
 ---
 
@@ -45,6 +49,7 @@ Displays real-time environmental data with a clean dashboard and historical grap
 
 * ESP32-2432S028 (CYD display)
 * BME280 environmental sensor (I2C)
+* Jumper wires
 
 ---
 
@@ -52,70 +57,69 @@ Displays real-time environmental data with a clean dashboard and historical grap
 
 Install via Arduino IDE Library Manager:
 
-* TFT_eSPI
-* Adafruit BME280
-* Adafruit Unified Sensor
+* **TFT_eSPI**
+* **Adafruit BME280**
+* **Adafruit Unified Sensor**
 
 ---
 
-## 🖥️ TFT_eSPI Configuration (IMPORTANT)
+## 🖥️ TFT_eSPI Configuration (Critical)
 
-⚠️ This project requires a custom TFT_eSPI setup for the CYD display.
+This project **requires creating a custom configuration file** for TFT_eSPI to work with the CYD display.
 
 ---
 
-### 📁 Option 1 (Recommended – Use Included File)
+### Step 1: Locate the TFT_eSPI Library
 
-Copy this file into your TFT_eSPI library:
+1. Open Arduino IDE
+2. Go to **Sketch → Include Library → Manage Libraries**
+3. Search for **TFT_eSPI** and install it if you haven’t
+4. Navigate to your Arduino libraries folder:
 
+   ```
+   Arduino/libraries/TFT_eSPI/
+   ```
+
+---
+
+### Step 2: Create a Custom Config File
+
+1. Inside the TFT_eSPI library folder, create a new file called:
+
+```text
+User_Setup_CYD.h
 ```
-config/User_Setup_CYD.h
-```
 
-Then edit:
-
-```
-TFT_eSPI/User_Setup_Select.h
-```
-
-Add:
+2. Paste this configuration:
 
 ```cpp
-#include <User_Setup_CYD.h>
-```
-
----
-
-### 📁 Option 2 (Manual Setup)
-
-Create this file:
-
-```
-TFT_eSPI/User_Setup_CYD.h
-```
-
-Paste the following:
-
-```cpp
+// USER SETUP FOR ESP32-2432S028 (CYD DISPLAY)
 #define USER_SETUP_INFO "CYD ESP32-2432S028"
 
+// Display driver
 #define ILI9341_DRIVER
 
+// Resolution
 #define TFT_WIDTH  240
 #define TFT_HEIGHT 320
 
+// SPI Pins
 #define TFT_MISO 12
 #define TFT_MOSI 13
 #define TFT_SCLK 14
 #define TFT_CS   15
 #define TFT_DC    2
-#define TFT_RST   4
+#define TFT_RST  4   // Or -1 if tied to ESP32 reset
 
+// Backlight
 #define TFT_BL   21
 #define TFT_BACKLIGHT_ON HIGH
 
+// SPI frequency
 #define SPI_FREQUENCY  40000000
+#define SPI_READ_FREQUENCY 20000000
 
+// Fonts
 #define LOAD_GLCD
 #define LOAD_FONT2
 #define LOAD_FONT4
@@ -123,82 +127,111 @@ Paste the following:
 #define LOAD_FONT7
 #define LOAD_FONT8
 #define LOAD_GFXFF
-
 #define SMOOTH_FONT
 ```
 
----
-
-### 🧪 Verify Setup
-
-Run this example from TFT_eSPI:
-
-```
-Read_User_Setup
-```
-
-Check Serial output to confirm correct configuration.
+> **Tip:** Make sure the pin numbers match your specific CYD board.
 
 ---
 
-## 🔧 Installation
+### Step 3: Select Your Custom Config
 
-1. Clone or download this repository
-2. Open the `.ino` file in Arduino IDE:
+1. Open `User_Setup_Select.h` inside the TFT_eSPI folder
+2. Comment out other includes and add:
 
-   ```
-   CYD_Weather_Station/CYD_Weather_Station_ver5_14.ino
-   ```
-3. Select board:
+```cpp
+#include <User_Setup_CYD.h>
+```
+
+3. Save the file
+
+---
+
+### Step 4: Verify Your Configuration
+
+1. Open Arduino IDE
+2. Go to **File → Examples → TFT_eSPI → Read_User_Setup**
+3. Upload it to your ESP32
+4. Open Serial Monitor and verify:
+
+   * Correct display driver detected
+   * Pins and resolution match your CYD display
+
+If the values are correct, your display is ready.
+
+---
+
+## 🔧 Wiring Diagram
+
+* **BME280 → ESP32 CYD Display (I2C)**
+
+  * VCC → 3.3V
+  * GND → GND
+  * SCL → GPIO 22
+  * SDA → GPIO 21
+
+*(Upload your own wiring image here: `images/setup.jpg`)*
+
+---
+
+## 📁 Folder Structure Recommendation
+
+Organize your GitHub repository for clarity:
+
+```text
+/ (root)
+ ├── README.md
+ ├── images/
+ │   ├── dashboard.jpg
+ │   ├── graph.jpg
+ │   └── setup.jpg
+ ├── config/
+ │   └── User_Setup_CYD.h
+ └── CYD_Weather_Station/
+     └── CYD_Weather_Station_ver5_14.ino
+```
+
+---
+
+## 🖥️ Running the Sketch
+
+1. Open `CYD_Weather_Station_ver5_14.ino` in Arduino IDE
+2. Select board:
 
    ```
    ESP32 Dev Module
    ```
+3. Select correct port
 4. Upload to your ESP32
 
 ---
 
-## 🖥️ Display Modes
+## 📈 Display Modes
 
-### Dashboard View
-
-* Live sensor readings
-* Clean layout
-* Comfort indicator
-
-### Graph View
-
-* Historical trends
-* Min/Max tracking
-* Smooth scrolling updates
+* **Dashboard View:** live sensor readings, comfort indicator
+* **Graph View:** historical trends, min/max tracking
 
 ---
 
-## 📈 Data Handling
+## 🔄 Updating Config
 
-* Rolling buffer stores recent readings
-* Used for graph rendering
-* Filters invalid sensor values (NaN protection)
+If you move to a new display or board:
 
----
-
-## 🌡️ Units
-
-Supports:
-
-* Celsius (°C)
-* Fahrenheit (°F)
-
-Efficient conversion without extra memory usage.
+1. Copy `User_Setup_CYD.h`
+2. Adjust pins and driver
+3. Update `User_Setup_Select.h`
 
 ---
 
-## 🚀 Future Improvements
+## 🧠 Tips for Beginners
 
-* WiFi connectivity (MQTT / HTTP)
-* SD card logging
-* Touchscreen UI
-* Multiple sensor support
+* Always back up your `User_Setup_CYD.h` before modifying
+* Use descriptive names for screenshots and config files
+* If your display shows white or blank screen:
+
+  * Check `TFT_CS` and `TFT_DC` pins
+  * Check SPI connections
+  * Verify backlight pin
 
 ---
 
@@ -213,7 +246,17 @@ Free to use, modify, and share.
 Created as a hobby project focused on:
 
 * ESP32 performance optimization
-* Embedded UI design
+* TFT display UI design
 * Reliable long-term operation
 
 ---
+
+This README now **teaches someone from scratch** how to:
+
+* Install libraries
+* Create a custom TFT_eSPI config file
+* Connect hardware
+* Run and verify the sketch
+
+---
+
