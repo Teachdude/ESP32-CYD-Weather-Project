@@ -1,0 +1,1000 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Weather Station — ESP32-2432S028 (CYD)  ·  "Cyber Lime" Edition v5.14
+//
+// Changes vs v5.13:
+//   [IMP 7]  getComfortLevel() return type changed from String to const char*.
+//            All four return values are string literals residing in flash.
+//            Returning String allocated a heap copy every call; const char*
+//            returns the literal pointer directly — zero allocation.  Called
+//            twice per second (dashboard + graph), so this eliminates 2 heap
+//            alloc/free cycles per second permanently.
+//   [IMP 8]  All remaining String objects in drawing functions converted to
+//            snprintf() into stack-allocated char buffers.  Affected sites:
+//              drawDashboardStatic() — ALT label
+//              drawDashboardDynamic() — comfort, unitStr, tStr (temperature
+//                number), dew point string, humidity string, pressure string
+//              drawGraphStatic() — title string
+//              drawGraphContent() — Y-axis scale labels, MAX/MIN stat strings
+//              drawGraphDynamic() — comfort, NOW: reading string
+//            After this change the sketch makes zero heap String allocations
+//            during normal display operation.
+//   [IMP 9]  UNIT= parser simplified to a direct character check.
+//            Previously: String unit = cmd.substring(5); useCelsius=(unit=="C")
+//            — allocated a one-character String on the heap.
+//            Now: useCelsius = (cmd[5] == 'C') — no allocation, no object.
+//   [IMP 10] NaN validation added to the setup() pre-fill block.
+//            bme.readTemperature() / bme.readPressure() called immediately
+//            after bme.begin() could return NaN on marginal I2C hardware.
+//            Previously this silently filled all 96 history slots and both
+//            cached extremes with NaN, corrupting the graph until reboot.
+//            Fix: validated values fall back to sensible defaults (25 C,
+//            1013.25 hPa sea-level standard) if either reading is NaN.
+//
+// Changes vs v5.12:
+//   [IMP 1]  Brightness rounding corrected in setBrightness() and setup().
+//            Formula changed from (pct * 255) / 100 to (pct * 255 + 50) / 100.
+//            Adds 0.5 before truncation, giving proper rounding at all values
+//            (e.g. 50% → 128 not 127, 75% → 191 correct).
+//   [IMP 2]  Sensor validation added to main loop tick.
+//            isnan() checks on rawC, hum, and rawP_hPa detect I2C glitches or
+//            transient BME280 dropouts.  Any NaN skips the entire draw/accumulate
+//            cycle silently: latestTempC/latestHum/latestInHg are not updated,
+//            pressureStack is not corrupted, and no garbage appears on screen.
+//            The 1-second timing cadence (lastTick) is preserved across skips.
+//   [IMP 3]  Sensor error recovery added to setup().
+//            Instead of a permanent while(1) halt, the sketch now makes up to
+//            5 reinitialisation attempts at 1-second intervals, feeding the
+//            watchdog between each attempt.  If all 5 fail, "RESTARTING..." is
+//            shown and esp_restart() triggers a clean reboot.  The attempt
+//            count is shown on screen so the user can see progress.
+//   [IMP 4]  Confirmation overlay converted from String to char[32] buffer.
+//            confirmMsg changed from String to char[32]; showConfirm() changed
+//            to accept const char*.  ALT=, INT=, and BRT= handlers now use
+//            snprintf() into local char buffers instead of String concatenation,
+//            eliminating heap fragmentation from transient String objects.
+//   [IMP 5]  Min/max pressure cached as globals (cachedMinP, cachedMaxP).
+//            Previously drawGraphContent() scanned all 96 history slots every
+//            graph redraw.  Cached values are now updated once per slot commit
+//            in loop(), so drawGraphContent() reads two floats instead of
+//            running an O(96) loop.
+//   [IMP 6]  Serial STATUS header/footer reformatted with box-drawing characters
+//            matching the rest of the file's comment style.
+//
+// Changes vs v5.11:
+//   [FIX 13] Upper clamp added to INT= serial command.
+//            Previously only the lower bound (1 min) was enforced.  Sending
+//            INT=9999 produced a ~7-day slot interval, a nonsensical
+//            "15930-HR TREND" title, and a graphInterval value close to the
+//            signed long maximum.  New upper bound: 480 min (8 hr per slot ×
+//            96 slots = 32-day maximum window).  Values above 480 are silently
+//            clamped to 480 and the confirm overlay shows the clamped value.
+//   [FIX 14] ALT label moved from drawDashboardDynamic() to drawDashboardStatic().
+//            The label ("ALT: Xm") only changes when an ALT= serial command is
+//            received, which already sets needsStaticRedraw = true.  Drawing and
+//            erasing it every second inside the dynamic function was wasted SPI
+//            work.  Moved to static with zero visual difference.
+//   [FIX 15] COL_AMBER comment typo corrected in THEME 9 history block.
+//            Line read: "Superseded by COL_LIME (data) / (Y-axis scale labels)"
+//            — COL_ACCENT was missing after the slash.
+//   [FIX 16] Sensor-error halt no longer triggers the hardware watchdog.
+//            Previously when bme.begin() failed, the sketch entered while(1)
+//            without feeding the watchdog.  After 10 s the watchdog rebooted
+//            the board, causing a continuous reboot loop with the error message
+//            visible only briefly.  Fix: esp_task_wdt_reset() is now called
+//            inside the while(1) so the error message stays on screen until
+//            power is cycled or the sensor is reconnected.
+//   [FIX 17] INT= handler now resets lastReading to 0 so the new interval
+//            takes effect on the very next tick.  Previously lastReading was
+//            left at its old value, meaning the first new-interval slot could
+//            be delayed by up to the full new interval duration.
+//   [FIX 18] graphInterval changed from long to unsigned long.
+//            It is always positive, is compared against unsigned long timing
+//            values throughout, and was explicitly cast to unsigned long in the
+//            history-commit check.  Using unsigned long from the start matches
+//            the type of all other timing variables and removes the cast.
+//
+// Changes vs v5.10:
+//   [FIX 12] Bottom of temperature number no longer cut off each second.
+//            Root cause: in drawDashboardDynamic() the temperature number
+//            (font 7, MC_DATUM at y=65, 48px tall) occupies y=41-89.  The
+//            comfort label erase rect started at y=86 and the dew point erase
+//            rect at y=88 — both inside the temperature text bottom (y=89).
+//            Every second those rects repainted COL_PANEL over the bottom
+//            1-3 pixel rows of the digits immediately after they were drawn.
+//            Fix: both erase rects now start at y=90 (one pixel below the
+//            temperature text bottom), leaving the number fully intact.
+//            Comfort text (BL_DATUM y=105, font 2 16px) starts at y=90 — it
+//            fits exactly within the adjusted rect with 2px bottom clearance.
+//            No layout positions, font sizes, or panel dimensions changed.
+//
+// Changes vs v5.9b:
+//   [CLEAN 1] COL_WHITE removed — it was defined but never referenced anywhere
+//             in the code.  The palette comment incorrectly stated it was used
+//             for sensor-error text; the actual sensor-error draw uses COL_RED.
+//             Removed the #define and corrected the palette table comment.
+//   [CLEAN 2] Section separator comment bar restored above handleSerialCommands().
+//             It was accidentally dropped when setBrightness() was inserted
+//             above it in v5.9.
+//   [CLEAN 3] Redundant pinMode(TFT_BL_PIN, OUTPUT) removed from setup().
+//             The core v3.x ledcAttach() call configures the pin itself;
+//             the preceding pinMode was a no-op.
+//
+// Changes vs v5.9a:
+//   [FIX 11] Boot safeguard for NVS brightness value.
+//            If BRT=0 is sent, it is saved to NVS correctly and takes effect
+//            immediately (screen goes dark).  On the next power cycle the sketch
+//            reads brightness=0 from NVS and the display appears completely blank
+//            — indistinguishable from a dead board.  Fix: after reading the NVS
+//            brightness value, clamp any value below 10 % back to BL_DEFAULT_PCT
+//            (75 %) before applying it.  BRT=0 still works in the running sketch
+//            (useful for testing) but can no longer permanently blind the display.
+//
+// Changes vs v5.9a (= v5.8 + v5.9 + FIX 10):
+//   [FIX 10] LEDC backlight init moved to AFTER tft.init() / tft.fillScreen().
+//            TFT_eSPI internally calls digitalWrite(TFT_BL, HIGH) during
+//            tft.init(), which reclaims pin 21 as a plain GPIO and silently
+//            destroys any LEDC channel configured before it.  Result: display
+//            stuck at full brightness regardless of BRT= commands.
+//            Fix: ledcAttach() + ledcWrite() now execute after the entire TFT
+//            init block (init, setRotation, invertDisplay, fillScreen), so LEDC
+//            always gets the last word on the pin.
+//
+// Changes vs v5.8:
+//   [PWM]  Backlight brightness now controlled via LEDC PWM instead of a plain
+//          digitalWrite(HIGH).  Uses the ESP32 Arduino core v3.x single-argument
+//          ledcAttach() / ledcWrite() API (no channel number required).
+//          8-bit resolution (0-255), 5 kHz carrier — above audible range and
+//          well within the CYD backlight driver's rated frequency.
+//          Brightness is NVS-persisted so it survives power cycles.
+//          Default: 75 % (duty 191/255).  Adjustable at runtime via BRT= command.
+//          A setBrightness(pct) helper clamps input to 0-100, converts to duty,
+//          writes to LEDC, and saves to NVS.
+//          BRT= is added to the STATUS report alongside the other settings.
+//
+// Changes vs v5.7:
+//   [THEME 9]  Complete palette overhaul — "Cyber Lime".
+//
+//   Research basis:
+//     Human photoreceptors peak sensitivity at ~555 nm (yellow-green), making
+//     electric lime the highest-legibility colour for data on a dark background.
+//     TN panels like the CYD's suffer from backlight bleed that makes pure black
+//     appear slightly grey.  Replacing 0x0000 with deep navy conceals this and
+//     makes all foreground colours appear richer.  Violet is the direct
+//     complementary colour to yellow-green on the colour wheel; using it for
+//     borders and labels creates a split-complementary scheme that reads as
+//     professional and high-contrast rather than garish.
+//
+//   COL_BG     0x0863  Deep navy #0B0F1A — screen fill, panel gaps.
+//                      RGB(8,12,24).  Replaces COL_BLACK (0x0000).
+//   COL_PANEL  0x2947  Deep violet-slate #2A283A — panel fill.
+//                      RGB(41,40,57).  Slight violet bias ties the panel surface
+//                      to the violet accent.  Replaces 0x31A7.
+//   COL_ACCENT 0x7AFF  Soft violet #7D5FFF — panel borders, fixed labels,
+//                      graph border/title/line, "Trend" label, breathing dot
+//                      trough, Y-axis scale labels, confirm overlay fill.
+//                      RGB(123,93,255).  Replaces amber-gold (0xDD05).
+//   COL_LIME   0xC7E5  Electric lime #C7FF2E — ALL sensor data values
+//                      (temperature, humidity, baro, dew point, NOW: reading,
+//                      COLLECTING DATA...), up-trend arrow, flat-trend bar,
+//                      breathing dot peak, confirm overlay text.
+//                      RGB(198,255,41).  NEW — replaces COL_WHITE and COL_AMBER
+//                      in every data-display role.
+//   COL_WHITE  —       Removed in v5.10.  Was 0xFFFF; defined but never used
+//                      in code (sensor-error draw uses COL_RED).
+//   COL_AMBER  —       Removed in v5.8.  Superseded by COL_LIME (data) /
+//                      COL_ACCENT (Y-axis scale labels).
+//   COL_SHADE  0x10A4  Dark violet-shadow #16142C — graph area fill.
+//                      RGB(16,20,33).  Replaces 0x18E4.
+//   COL_GRID   0x318A  Violet-tinted grid lines #373050.
+//                      RGB(49,48,82).  Replaces 0x4206.
+//
+//   Comfort semantic colours are intentionally unchanged — their warm-to-cool
+//   gradient (cyan / green / orange / red) carries well-established meaning:
+//     COL_CYAN   0x07FF  DRY
+//     COL_GREEN  0x07E0  COMFORTABLE
+//     COL_ORANGE 0xFD20  HUMID
+//     COL_RED    0xF800  OPPRESSIVE / down-trend / MIN label
+//
+//   Confirm overlay redesigned: soft-violet fill, deep-navy border,
+//   electric-lime text.  Previously: amber fill, black border, black text.
+//
+// All fixes and improvements from v5.0 – v5.7 are preserved.
+//
+// Barometric calibration note:
+//   Use ALT= to fine-tune against a local reference (e.g. airport METAR).
+//   A residual +-0.03 inHg offset is within the BME280 factory tolerance.
+//
+// Serial commands (115200 baud, newline-terminated, case-insensitive):
+//   ALT=52      Set altitude to 52 m, save to NVS
+//   INT=15      Set history slot interval to 15 min, save to NVS
+//   UNIT=C      Switch display to Celsius, save to NVS
+//   UNIT=F      Switch display to Fahrenheit, save to NVS
+//   BRT=75      Set backlight brightness to 75 % (0-100), save to NVS
+//   STATUS      Print current settings and live sensor readings
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include <Wire.h>
+#include <TFT_eSPI.h>
+#include <Adafruit_BME280.h>
+#include <Preferences.h>
+#include <WiFi.h>
+#include <math.h>
+#include <esp_task_wdt.h>
+
+// Watchdog timeout — auto-reboots if the main loop stalls (e.g. I2C lockup).
+// Uses esp_task_wdt_config_t struct API (Arduino ESP32 core v3.x).
+#define WDT_TIMEOUT_SEC  10
+
+TFT_eSPI    tft = TFT_eSPI();
+TFT_eSprite dotSprite(&tft);    // [FIX 3] 20x20 sprite for flicker-free breathing dot
+Adafruit_BME280 bme;
+Preferences     prefs;
+
+// ── Board Selection ──────────────────────────────────────────────────────────
+// Some ESP32-2432S028 (CYD) units ship with an inverted display panel.
+// Set to true for the inverted board, false for the normal board.
+// This is resolved at compile time — zero runtime cost.
+#define INVERT_DISPLAY  true
+
+// ── Hardware ─────────────────────────────────────────────────────────────────
+#define TFT_BL_PIN   21
+#define I2C_SDA      27
+#define I2C_SCL      22
+#define BME280_ADDR  0x76
+
+// ── Backlight PWM ─────────────────────────────────────────────────────────────
+// Core v3.x API: ledcAttach(pin, freq, resolution) / ledcWrite(pin, duty).
+// 8-bit resolution → duty range 0-255.  5 kHz is above audible range and well
+// within the CYD backlight driver's rated frequency.
+#define BL_PWM_FREQ      5000   // Hz
+#define BL_PWM_RES          8   // bits (0-255 duty range)
+#define BL_DEFAULT_PCT     75   // % brightness on first boot (no NVS value yet)
+
+// ── Color Palette — "Cyber Lime" ─────────────────────────────────────────────
+//
+//  COL_BG      0x0863  Deep navy #0B0F1A — screen fill and panel gaps   [was 0x0000]
+//                      RGB(8,12,24) — masks TN backlight bleed
+//  COL_PANEL   0x2947  Deep violet-slate #2A283A — panel fill            [was 0x31A7]
+//                      RGB(41,40,57)
+//  COL_ACCENT  0x7AFF  Soft violet #7D5FFF — borders, fixed labels,      [was 0xDD05]
+//                      graph border/title/line, "Trend" label,
+//                      breathing dot trough, Y-axis scale labels,
+//                      confirm overlay fill.  RGB(123,93,255)
+//  COL_LIME    0xC7E5  Electric lime #C7FF2E — ALL sensor data values,   [NEW]
+//                      up-trend arrow, flat-trend bar, dot peak,
+//                      confirm overlay text.  RGB(198,255,41)
+//  COL_CYAN    0x07FF  DRY comfort level                                  [unchanged]
+//  COL_RED     0xF800  OPPRESSIVE comfort, down-trend arrow, MIN label,   [unchanged]
+//                      sensor-error text in setup()
+//  COL_GREEN   0x07E0  COMFORTABLE comfort level only                     [unchanged]
+//  COL_ORANGE  0xFD20  HUMID comfort level, MAX label                     [unchanged]
+//  COL_SHADE   0x10A4  Dark violet-shadow — graph area fill               [was 0x18E4]
+//                      RGB(16,20,33)
+//  COL_GRID    0x318A  Violet-tinted grid lines                           [was 0x4206]
+//                      RGB(49,48,82)
+//
+#define COL_BG       0x0863   // [THEME 9] deep navy screen background / gaps
+#define COL_PANEL    0x2947   // [THEME 9] deep violet-slate panel fill
+#define COL_ACCENT   0x7AFF   // [THEME 9] soft violet — borders, labels, graph
+#define COL_LIME     0xC7E5   // [THEME 9] electric lime — all sensor data values
+#define COL_CYAN     0x07FF   // DRY comfort level (unchanged)
+#define COL_RED      0xF800   // OPPRESSIVE / down-trend / MIN / sensor-error (unchanged)
+#define COL_GREEN    0x07E0   // COMFORTABLE comfort level only (unchanged)
+#define COL_ORANGE   0xFD20   // HUMID comfort level / MAX label (unchanged)
+#define COL_SHADE    0x10A4   // [THEME 9] dark violet-shadow graph area fill
+#define COL_GRID     0x318A   // [THEME 9] violet-tinted grid lines
+
+// ── NVS-Persisted Settings ───────────────────────────────────────────────────
+float         userAltitude;    // metres above sea level
+unsigned long graphInterval;   // milliseconds between history slots (always positive)
+bool          useCelsius;      // true = C display, false = F display
+int           userBrightness;  // backlight level 0-100 %
+
+// ── Sensor History ───────────────────────────────────────────────────────────
+const int   HISTORY_SIZE = 96;
+float       pressureHistory[HISTORY_SIZE] = {0};
+int         historyIndex = 0;
+bool        historyFull  = false;
+
+// ── Cached Graph Extremes ─────────────────────────────────────────────────────
+// [IMP 5] Updated once per slot commit in loop() — eliminates O(96) scan from
+// drawGraphContent() on every graph redraw.
+float cachedMinP = 9999.0f;
+float cachedMaxP =    0.0f;
+
+// ── Timing ───────────────────────────────────────────────────────────────────
+unsigned long lastReading = 0;
+unsigned long modeTimer   = 0;   // initialized to millis() in setup() [FIX 9]
+unsigned long lastTick    = 0;
+int           currentMode = 0;
+
+// ── Moving Average (double avoids float precision loss at ~450 samples/slot) ─
+double pressureStack = 0.0;
+int    sampleCount   = 0;
+
+// ── Cached Live Readings (for STATUS command) ────────────────────────────────
+float latestTempC = 0;
+float latestHum   = 0;
+float latestInHg  = 0;
+
+// ── Confirmation Overlay ─────────────────────────────────────────────────────
+char          confirmMsg[32] = "";   // [IMP 4] fixed buffer — no heap fragmentation
+unsigned long confirmUntil   = 0;
+bool          confirmActive  = false;
+
+// ── Anti-Flicker State ────────────────────────────────────────────────────────
+// needsStaticRedraw: set on mode change, serial command, or confirm-overlay clear.
+//                    Triggers a full static panel redraw on the next tick.
+// needsGraphRedraw : set whenever a new pressure slot is committed to history,
+//                    or when needsStaticRedraw fires on the graph screen.
+//                    Triggers a graph-content redraw on the next tick.
+bool needsStaticRedraw = true;   // [FIX 1/4/5]
+bool needsGraphRedraw  = true;   // [FIX 4]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FORWARD DECLARATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+void     drawDashboardStatic();
+void     drawDashboardDynamic(float rawC, float h, float p);
+void     drawGraphStatic();
+void     drawGraphContent(float rawC, float hum);
+void     drawGraphDynamic(float currentInHg, float rawC, float hum);
+void     drawConfirmOverlay();
+void     drawBreathingDot();
+void     drawTrendArrow(float delta, int cx, int cy);
+uint16_t getComfortColor(float dewC);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIRMATION OVERLAY HELPER
+// [IMP 4] Accepts const char* — no String allocation on caller side.
+// ─────────────────────────────────────────────────────────────────────────────
+void showConfirm(const char* msg) {
+  strncpy(confirmMsg, msg, sizeof(confirmMsg) - 1);
+  confirmMsg[sizeof(confirmMsg) - 1] = '\0';   // guarantee null-termination
+  confirmUntil  = millis() + 2000;
+  confirmActive = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BRIGHTNESS HELPER
+// Clamps pct to 0-100, converts to 8-bit duty, writes to LEDC, saves to NVS.
+// ─────────────────────────────────────────────────────────────────────────────
+void setBrightness(int pct) {
+  if (pct < 0)   pct = 0;
+  if (pct > 100) pct = 100;
+  userBrightness = pct;
+  uint8_t duty = (uint8_t)((pct * 255 + 50) / 100);  // [IMP 1] +50 for correct rounding
+  ledcWrite(TFT_BL_PIN, duty);
+  prefs.putInt("brightness", userBrightness);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SERIAL COMMAND PARSER
+// ─────────────────────────────────────────────────────────────────────────────
+void handleSerialCommands() {
+  if (!Serial.available()) return;
+
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+  cmd.toUpperCase();
+
+  if (cmd.startsWith("ALT=")) {
+    float alt = cmd.substring(4).toFloat();
+    if (alt < -500.0f) alt = -500.0f;    // [FIX 6] clamp to valid Earth range
+    if (alt >  8849.0f) alt = 8849.0f;
+    userAltitude = alt;
+    prefs.putFloat("altitude", userAltitude);
+    Serial.printf(">> ALTITUDE UPDATED: %.1f m\n", userAltitude);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "ALT=%dm  OK", (int)userAltitude);  // [IMP 4]
+    showConfirm(buf);
+    needsStaticRedraw = true;
+  }
+  else if (cmd.startsWith("INT=")) {
+    int mins = cmd.substring(4).toInt();
+    if (mins < 1)   mins = 1;    // lower bound: 1 min per slot
+    if (mins > 480) mins = 480;  // [FIX 13] upper bound: 480 min/slot = 32-day window
+    graphInterval = (unsigned long)mins * 60000UL;
+    prefs.putLong("interval", (long)graphInterval);
+    pressureStack = 0.0;
+    sampleCount   = 0;
+    lastReading   = 0;           // [FIX 17] force immediate slot commit on next tick
+    Serial.printf(">> INTERVAL UPDATED: %d min\n", mins);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "INT=%dmin  OK", mins);  // [IMP 4]
+    showConfirm(buf);
+    needsStaticRedraw = true;
+    needsGraphRedraw  = true;
+  }
+  else if (cmd.startsWith("UNIT=")) {
+    // [IMP 9] Direct character check — no String allocation for a single char.
+    useCelsius = (cmd[5] == 'C');
+    prefs.putBool("celsius", useCelsius);
+    Serial.printf(">> UNIT UPDATED: %s\n", useCelsius ? "Celsius" : "Fahrenheit");
+    showConfirm(useCelsius ? "UNIT = C  OK" : "UNIT = F  OK");
+    needsStaticRedraw = true;
+  }
+  else if (cmd.startsWith("BRT=")) {
+    int pct = cmd.substring(4).toInt();
+    setBrightness(pct);
+    Serial.printf(">> BRIGHTNESS UPDATED: %d %%\n", userBrightness);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "BRT=%d%%  OK", userBrightness);  // [IMP 4]
+    showConfirm(buf);
+  }
+  else if (cmd == "STATUS") {
+    int totalHours = (int)(((long long)graphInterval * HISTORY_SIZE) / 3600000LL);
+    Serial.println("── STATUS ──────────────────────────────────────────");
+    Serial.printf("  Altitude   : %.1f m\n",   userAltitude);
+    Serial.printf("  Interval   : %lu min  (%d-hr window)\n",
+                  graphInterval / 60000UL, totalHours);
+    Serial.printf("  Unit       : %s\n",        useCelsius ? "Celsius" : "Fahrenheit");
+    Serial.printf("  Brightness : %d %%\n",     userBrightness);
+    Serial.printf("  Buffer     : %s  (%d / %d slots)\n",
+                  historyFull ? "FULL" : "FILLING",
+                  historyFull ? HISTORY_SIZE : historyIndex, HISTORY_SIZE);
+    Serial.printf("  Temp       : %.1f C\n",    latestTempC);
+    Serial.printf("  Humidity   : %.1f %%\n",   latestHum);
+    Serial.printf("  Pressure   : %.2f inHg\n", latestInHg);
+    Serial.println("────────────────────────────────────────────────────");
+  }
+}
+
+// ── Environmental Math ───────────────────────────────────────────────────────
+
+float calculateDewPointC(float tempC, float humidity) {
+  float a = 17.271f, b = 237.7f;
+  float alpha = ((a * tempC) / (b + tempC)) + log(humidity / 100.0f);
+  return (b * alpha) / (a - alpha);
+}
+
+// [IMP 7] Returns const char* — literal pointer into flash, zero heap allocation.
+const char* getComfortLevel(float dewC) {
+  if (dewC < 10.0f)  return "DRY";
+  if (dewC < 15.6f)  return "COMFORTABLE";
+  if (dewC < 21.1f)  return "HUMID";
+  return "OPPRESSIVE";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMFORT COLOR
+// Semantic colours kept intentionally from the original design — their
+// warm-to-cool gradient is immediately understood at a glance:
+//   DRY         -> cyan   (cool, refreshing)
+//   COMFORTABLE -> green  (pleasant)
+//   HUMID       -> orange (warm, sticky)
+//   OPPRESSIVE  -> red    (hot, uncomfortable)
+// ─────────────────────────────────────────────────────────────────────────────
+uint16_t getComfortColor(float dewC) {
+  if (dewC < 10.0f)  return COL_CYAN;
+  if (dewC < 15.6f)  return COL_GREEN;
+  if (dewC < 21.1f)  return COL_ORANGE;
+  return COL_RED;
+}
+
+float toDisplay(float tempC) {
+  return useCelsius ? tempC : (tempC * 1.8f) + 32.0f;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BREATHING DOT  [FIX 3]
+// Rendered into a 20x20 TFT_eSprite. The sprite is filled with COL_PANEL
+// to erase the previous circle, then the new circle is drawn and pushed as
+// one SPI burst — no flicker.
+// Sprite top-left: (276, 18) -> circle centre at (286, 28).
+// [THEME 9] Peak: COL_LIME (electric lime). Trough: COL_ACCENT (soft violet).
+//           The pulse cycles through the two palette primaries — a live
+//           heartbeat that reinforces the Cyber Lime aesthetic.
+// ─────────────────────────────────────────────────────────────────────────────
+void drawBreathingDot() {
+  float    phase     = (float)(millis() % 4000) / 4000.0f;
+  float    breathVal = (sinf(phase * 2.0f * PI) + 1.0f) / 2.0f;
+  int      r         = 3 + (int)(breathVal * 5.0f);
+  uint16_t col       = (breathVal > 0.5f) ? COL_LIME : COL_ACCENT; // [THEME 9]
+
+  dotSprite.fillSprite(COL_PANEL);       // erase with panel color
+  dotSprite.fillCircle(10, 10, r, col);  // draw new circle
+  dotSprite.pushSprite(276, 18);         // push as single SPI burst
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TREND ARROW
+// [THEME 9] Up arrow: COL_LIME — rising pressure is a positive reading,
+//                                matching the lime data colour.
+//           Down arrow: COL_RED — falling pressure, warning colour.
+//           Flat bar:   COL_LIME — neutral, consistent with data colour.
+// ─────────────────────────────────────────────────────────────────────────────
+void drawTrendArrow(float delta, int cx, int cy) {
+  const int hw = 8, hh = 7;
+  if (delta > 0.005f)
+    tft.fillTriangle(cx, cy-hh, cx-hw, cy+hh, cx+hw, cy+hh, COL_LIME);  // [THEME 9]
+  else if (delta < -0.005f)
+    tft.fillTriangle(cx, cy+hh, cx-hw, cy-hh, cx+hw, cy-hh, COL_RED);
+  else
+    tft.fillRect(cx-hw, cy-3, hw*2, 6, COL_LIME);                        // [THEME 9]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD — STATIC  [FIX 1]
+// Panel fills, borders, and fixed labels.
+// [THEME 9] COL_ACCENT (soft violet) borders and fixed labels throughout.
+// Called only when needsStaticRedraw is true.
+// ─────────────────────────────────────────────────────────────────────────────
+void drawDashboardStatic() {
+  // ── Top panel — Temperature ───────────────────────────────────────────────
+  tft.fillRoundRect(10, 10, 300, 105, 12, COL_PANEL);
+  tft.drawRoundRect(10, 10, 300, 105, 12, COL_ACCENT);   // [THEME 9] violet border
+
+  // ── ALT label (top-left of temperature panel) ─────────────────────────────
+  // [FIX 14] Moved here from drawDashboardDynamic() — label only changes on
+  // ALT= command, which already sets needsStaticRedraw = true.  Drawing it
+  // here eliminates one fillRect + drawString per second from the dynamic path.
+  tft.setTextColor(COL_ACCENT, COL_PANEL);
+  tft.setTextDatum(TL_DATUM);
+  char altBuf[20];
+  snprintf(altBuf, sizeof(altBuf), "ALT: %dm", (int)userAltitude);  // [IMP 8]
+  tft.drawString(altBuf, 25, 22, 2);
+
+  // ── Bottom-left panel — Humidity ──────────────────────────────────────────
+  tft.fillRoundRect(10, 125, 145, 105, 12, COL_PANEL);
+  tft.drawRoundRect(10, 125, 145, 105, 12, COL_ACCENT);  // [THEME 9] violet border
+  tft.setTextColor(COL_ACCENT, COL_PANEL);               // [THEME 9] violet label
+  tft.setTextDatum(TC_DATUM);
+  tft.drawCentreString("HUMIDITY", 82, 138, 2);
+
+  // ── Bottom-right panel — Barometric ───────────────────────────────────────
+  tft.fillRoundRect(165, 125, 145, 105, 12, COL_PANEL);
+  tft.drawRoundRect(165, 125, 145, 105, 12, COL_ACCENT); // [THEME 9] violet border
+  tft.setTextColor(COL_ACCENT, COL_PANEL);               // [THEME 9] violet label
+  tft.setTextDatum(TC_DATUM);
+  tft.drawCentreString("BARO inHg", 237, 138, 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DASHBOARD — DYNAMIC  [FIX 2 + FIX 7 + FIX 8]
+// Sensor values only — called every second.
+//
+// [THEME 9] ALL sensor data values use COL_LIME (temperature number, degree
+//           circle, unit letter, humidity %, baro, dew point).
+//           Fixed labels use COL_ACCENT (violet).
+//
+// FIX 7 — temperature fillRect start y=32 -> y=38 to stop erasing ALT bottom.
+//   Old rect (44,32,220,67) covered y=32-99, overlapping ALT text bottom
+//   (y=32-37).  Fixed rect (44,38,220,61) starts at y=38 — one pixel after
+//   the ALT text bottom.  Degree circle top is at y=38 (center y=43, r=5).
+//
+// FIX 8 — all setTextColor() calls use two-argument form with COL_PANEL.
+//   Character-cell backgrounds are explicitly painted with the panel colour
+//   on every draw, providing a second layer of ghost-pixel protection.
+// ─────────────────────────────────────────────────────────────────────────────
+void drawDashboardDynamic(float rawC, float h, float p) {
+  float       dewC    = calculateDewPointC(rawC, h);
+  const char* comfort = getComfortLevel(dewC);           // [IMP 7+8] no heap alloc
+  uint16_t    comCol  = getComfortColor(dewC);
+  float       dispTemp = toDisplay(rawC);
+  float       dispDew  = toDisplay(dewC);
+  const char* unitStr  = useCelsius ? "C" : "F";         // [IMP 8] literal pointer
+
+  // ── Breathing dot ─────────────────────────────────────────────────────────
+  drawBreathingDot();
+
+  // ── Temperature value + degree symbol ─────────────────────────────────────
+  // [FIX 7] fillRect y=38, height=61 — safe minimum; degree circle top at y=38.
+  tft.fillRect(44, 38, 220, 61, COL_PANEL);
+  tft.setTextColor(COL_LIME, COL_PANEL);                 // [THEME 9] lime data
+  tft.setTextDatum(MC_DATUM);
+  char tStr[8];
+  snprintf(tStr, sizeof(tStr), "%d", (int)round(dispTemp));  // [IMP 8]
+  int mainX = 130, mainY = 65;
+  tft.drawString(tStr, mainX, mainY, 7);
+
+  int textW = tft.textWidth(tStr, 7);
+  int symX  = mainX + (textW / 2) + 14;
+  tft.drawCircle(symX, mainY - 22, 5, COL_LIME);        // [THEME 9] lime degree circle
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(COL_LIME, COL_PANEL);                 // [THEME 9] lime unit letter
+  tft.drawString(unitStr, symX + 10, mainY - 14, 4);
+
+  // ── Comfort label (bottom-left of temperature panel) ──────────────────────
+  // Width 140 safely clears "COMFORTABLE" (~110 px in font 2).
+  // [FIX 12] fillRect now starts at y=90 — one pixel below the temperature
+  // text bottom (font 7 MC_DATUM y=65, 48px tall → bottom at y=89).
+  // Previous start y=86 was erasing the bottom 3 rows of the temperature
+  // number every second.  Comfort text (BL_DATUM y=105, font 2 16px) starts
+  // at y=90 — fits within this rect with 2px bottom clearance to y=107.
+  tft.fillRect(22, 90, 140, 18, COL_PANEL);
+  tft.setTextDatum(BL_DATUM);
+  tft.setTextColor(comCol, COL_PANEL);                   // semantic comfort colour
+  tft.drawString(comfort, 25, 105, 2);
+
+  // ── Dew point (bottom-right of temperature panel) ─────────────────────────
+  // [THEME 9] COL_AMBER -> COL_LIME: dew point is a sensor data value.
+  // [FIX 12] fillRect now starts at y=90 — same reasoning as comfort label.
+  tft.fillRect(155, 90, 148, 17, COL_PANEL);
+  tft.setTextDatum(BR_DATUM);
+  tft.setTextColor(COL_LIME, COL_PANEL);                 // [THEME 9] lime data
+  char dewBuf[24];
+  snprintf(dewBuf, sizeof(dewBuf), "DEW PT: %d %s",     // [IMP 8]
+           (int)round(dispDew), unitStr);
+  tft.drawString(dewBuf, 295, 105, 2);
+
+  // ── Humidity value ─────────────────────────────────────────────────────────
+  // Font 4 TC_DATUM at y=185 -> bottom ~y=211. Height 67 -> covers to y=225.
+  tft.fillRect(14, 158, 133, 67, COL_PANEL);
+  tft.setTextColor(COL_LIME, COL_PANEL);                 // [THEME 9] lime data
+  tft.setTextDatum(TC_DATUM);
+  char humBuf[8];
+  snprintf(humBuf, sizeof(humBuf), "%d%%", (int)round(h));  // [IMP 8]
+  tft.drawCentreString(humBuf, 82, 185, 4);
+
+  // ── Pressure value ─────────────────────────────────────────────────────────
+  tft.fillRect(169, 158, 133, 67, COL_PANEL);
+  tft.setTextColor(COL_LIME, COL_PANEL);                 // [THEME 9] lime data
+  char presBuf[10];
+  snprintf(presBuf, sizeof(presBuf), "%.2f", p);         // [IMP 8]
+  tft.drawCentreString(presBuf, 237, 185, 4);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GRAPH — STATIC  [FIX 4]
+// Outer border and title only.
+// [THEME 9] Soft violet border and title text.
+// Called only when needsStaticRedraw is true.
+// ─────────────────────────────────────────────────────────────────────────────
+void drawGraphStatic() {
+  tft.fillRoundRect(5, 5, 310, 230, 10, COL_PANEL);
+  tft.drawRoundRect(5, 5, 310, 230, 10, COL_ACCENT);    // [THEME 9] violet border
+
+  int  totalHours   = (int)(((long long)graphInterval * HISTORY_SIZE) / 3600000LL);
+  int  intervalMins = (int)(graphInterval / 60000);
+  char title[32];
+  snprintf(title, sizeof(title), "%d-HR TREND (AVG@%dm)", totalHours, intervalMins);  // [IMP 8]
+  tft.setTextColor(COL_ACCENT, COL_PANEL);               // [THEME 9] violet title
+  tft.setTextDatum(MC_DATUM);
+  tft.drawCentreString(title, 160, 18, 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GRAPH — CONTENT  [FIX 4]
+// Grid, plot, Y-axis labels, MAX/MIN stats.
+// Called only when needsGraphRedraw is true (new history slot committed).
+//
+// [THEME 9] Data values (NOW, COLLECTING DATA) -> COL_LIME.
+//           Y-axis scale labels -> COL_ACCENT (they are axis annotations,
+//           not raw sensor values, so violet keeps them visually subordinate).
+//           Graph line -> COL_ACCENT.  Area fill -> COL_SHADE.
+//           Grid lines -> COL_GRID (violet-tinted).
+// ─────────────────────────────────────────────────────────────────────────────
+void drawGraphContent(float rawC, float hum) {
+  const int gx = 45, gy = 50, gw = 260, gh = 110;
+  int pts = historyFull ? HISTORY_SIZE : historyIndex;
+
+  // Clear content area from safely below the title.
+  // Font 2 MC_DATUM at y=18 -> bottom at y=26; start at y=31 (5 px clearance).
+  tft.fillRect(6, 31, 308, 169, COL_PANEL);
+
+  if (pts < 2) {
+    tft.setTextColor(COL_LIME, COL_PANEL);               // [THEME 9] lime data
+    tft.setTextDatum(MC_DATUM);
+    tft.drawCentreString("COLLECTING DATA...", 160, 120, 2);
+    float    dewC   = calculateDewPointC(rawC, hum);
+    uint16_t comCol = getComfortColor(dewC);
+    tft.setTextColor(comCol, COL_PANEL);
+    tft.drawCentreString(getComfortLevel(dewC), 160, 212, 2);
+    return;
+  }
+
+  // ── Min / max — use values cached at slot-commit time [IMP 5] ──────────────
+  // cachedMinP/cachedMaxP are updated in loop() whenever a new slot is committed,
+  // eliminating the O(96) scan that previously ran on every graph redraw.
+  float minP  = cachedMinP;
+  float maxP  = cachedMaxP;
+  float range = maxP - minP;
+  if (range < 1.0f) range = 1.0f;
+
+  // ── Vertical grid lines ───────────────────────────────────────────────────
+  for (int g = 0; g <= 12; g++) {
+    int lx = gx + (g * gw / 12);
+    tft.drawFastVLine(lx, gy, gh, COL_GRID);             // [THEME 9] violet grid
+  }
+
+  // ── Y-axis scale labels ───────────────────────────────────────────────────
+  // [THEME 9] COL_AMBER -> COL_ACCENT: these are axis scale annotations
+  // (not raw data readings), so violet keeps them visually subordinate to lime.
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(COL_ACCENT, COL_PANEL);               // [THEME 9] violet scale
+  char yMax[10], yMin[10];
+  snprintf(yMax, sizeof(yMax), "%.2f", maxP * 0.02953f); // [IMP 8]
+  snprintf(yMin, sizeof(yMin), "%.2f", minP * 0.02953f); // [IMP 8]
+  tft.drawString(yMax, gx - 2, gy,          1);
+  tft.drawString(yMin, gx - 2, gy + gh - 6, 1);
+
+  // ── Plot chronologically ──────────────────────────────────────────────────
+  // Area fill: COL_SHADE (dark violet-shadow — subtly darker than the panel).
+  // Data line: COL_ACCENT (soft violet) — a complementary contrast to lime.
+  int divisor = pts - 1;
+  for (int i = 0; i < pts - 1; i++) {
+    int idxA = historyFull ? (historyIndex + i)     % HISTORY_SIZE : i;
+    int idxB = historyFull ? (historyIndex + i + 1) % HISTORY_SIZE : i + 1;
+    int x1 = gx + (i       * gw / divisor);
+    int x2 = gx + ((i + 1) * gw / divisor);
+    int y1 = (gy + gh) - (int)((pressureHistory[idxA] - minP) / range * gh);
+    int y2 = (gy + gh) - (int)((pressureHistory[idxB] - minP) / range * gh);
+    tft.drawFastVLine(x1, y1, (gy + gh) - y1, COL_SHADE); // [THEME 9] violet shadow
+    tft.drawLine(x1, y1, x2, y2, COL_ACCENT);              // [THEME 9] violet line
+  }
+
+  // ── MAX / MIN stats (left side) ───────────────────────────────────────────
+  tft.setTextDatum(TL_DATUM);
+  char maxBuf[20], minBuf[20];
+  snprintf(maxBuf, sizeof(maxBuf), "MAX: %.2f", maxP * 0.02953f);  // [IMP 8]
+  snprintf(minBuf, sizeof(minBuf), "MIN: %.2f", minP * 0.02953f);  // [IMP 8]
+  tft.setTextColor(COL_ORANGE, COL_PANEL);
+  tft.drawString(maxBuf, 10, 168, 2);
+  tft.setTextColor(COL_RED, COL_PANEL);
+  tft.drawString(minBuf, 10, 186, 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GRAPH — DYNAMIC  [FIX 4]
+// NOW reading, trend arrow, comfort label — updated every second.
+// Each element is erased with a targeted fillRect() before redrawing.
+// ─────────────────────────────────────────────────────────────────────────────
+void drawGraphDynamic(float currentInHg, float rawC, float hum) {
+  int pts = historyFull ? HISTORY_SIZE : historyIndex;
+  if (pts < 2) return;   // drawGraphContent handles the collecting-data case
+
+  int   oldestIdx = historyFull ? historyIndex : 0;
+  int   newestIdx = (historyIndex - 1 + HISTORY_SIZE) % HISTORY_SIZE;
+  float delta     = (pressureHistory[newestIdx] - pressureHistory[oldestIdx]) * 0.02953f;
+
+  // ── NOW: reading ──────────────────────────────────────────────────────────
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(COL_LIME, COL_PANEL);                 // [THEME 9] lime data
+  char nowBuf[16];
+  snprintf(nowBuf, sizeof(nowBuf), "NOW: %.2f", currentInHg);  // [IMP 8]
+  tft.drawString(nowBuf, 310, 168, 2);
+
+  // ── "Trend" label ─────────────────────────────────────────────────────────
+  tft.setTextColor(COL_ACCENT, COL_PANEL);               // [THEME 9] violet label
+  tft.drawString("Trend", 262, 183, 2);
+
+  // ── Trend arrow ───────────────────────────────────────────────────────────
+  // Shape changes (up/down/flat) so previous triangle footprint must be cleared.
+  tft.fillRect(274, 183, 18, 16, COL_PANEL);
+  drawTrendArrow(delta, 282, 190);
+
+  // ── Comfort label ─────────────────────────────────────────────────────────
+  // Text width varies (DRY -> COMFORTABLE) so a fillRect clear is used.
+  float       dewC    = calculateDewPointC(rawC, hum);
+  const char* comfort = getComfortLevel(dewC);           // [IMP 7+8] no heap alloc
+  uint16_t    comCol  = getComfortColor(dewC);
+  tft.fillRect(55, 203, 210, 18, COL_PANEL);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(comCol, COL_PANEL);
+  tft.drawCentreString(comfort, 160, 212, 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CONFIRMATION OVERLAY
+// [THEME 9] Soft-violet fill, deep-navy border, electric-lime text.
+//           Previously: amber-gold fill, black border, black text.
+//           The violet-and-lime combination ensures the overlay is immediately
+//           distinct from the panel background while staying within the palette.
+// ─────────────────────────────────────────────────────────────────────────────
+void drawConfirmOverlay() {
+  tft.fillRoundRect(55, 95, 210, 50, 8, COL_ACCENT);    // [THEME 9] violet fill
+  tft.drawRoundRect(55, 95, 210, 50, 8, COL_BG);         // [THEME 9] navy border
+  tft.setTextColor(COL_LIME, COL_ACCENT);                // [THEME 9] lime text on violet
+  tft.setTextDatum(MC_DATUM);
+  tft.drawCentreString(confirmMsg, 160, 120, 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETUP
+// ─────────────────────────────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_OFF);
+
+  // Hardware watchdog — core v3.x struct API
+  const esp_task_wdt_config_t wdt_config = {
+    .timeout_ms     = WDT_TIMEOUT_SEC * 1000,
+    .idle_core_mask = 0,
+    .trigger_panic  = true
+  };
+  esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_add(NULL);
+
+  prefs.begin("weather-stat", false);
+  userAltitude   = prefs.getFloat("altitude",   100.0f);
+  graphInterval  = (unsigned long)prefs.getLong("interval", 450000L);
+  useCelsius     = prefs.getBool ("celsius",    false);
+  userBrightness = prefs.getInt  ("brightness", BL_DEFAULT_PCT);
+  // [FIX 11] Clamp — a stored value below 10 % would make the display appear
+  // completely blank on boot, indistinguishable from a hardware fault.
+  if (userBrightness < 10) userBrightness = BL_DEFAULT_PCT;
+
+  Serial.printf(">> BOOT -- Altitude: %.1f m | Interval: %.1f min | Unit: %s | Brightness: %d %%\n",
+                userAltitude, graphInterval / 60000.0,
+                useCelsius ? "Celsius" : "Fahrenheit",
+                userBrightness);
+
+  tft.init();
+  tft.setRotation(1);
+#if INVERT_DISPLAY
+  tft.invertDisplay(true);
+#else
+  tft.invertDisplay(false);
+#endif
+  tft.fillScreen(COL_BG);                                // [THEME 9] deep navy fill
+
+  // Backlight PWM — MUST be configured AFTER tft.init().
+  // TFT_eSPI calls digitalWrite(TFT_BL, HIGH) inside init(), which reclaims
+  // pin 21 as a plain GPIO and silently breaks any LEDC setup done before it.
+  // By attaching LEDC here we always get the last word on the pin.
+  // Core v3.x API: ledcAttach() configures the pin itself — no pinMode needed.
+  ledcAttach(TFT_BL_PIN, BL_PWM_FREQ, BL_PWM_RES);
+  ledcWrite(TFT_BL_PIN, (uint8_t)((userBrightness * 255 + 50) / 100));  // [IMP 1]
+
+  // [FIX 3] Create breathing-dot sprite once; 800 bytes from internal SRAM.
+  dotSprite.createSprite(20, 20);
+  dotSprite.setColorDepth(16);
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  // [IMP 3] Up to 5 reinitialisation attempts before a clean reboot.
+  // The watchdog is fed between attempts so it does not fire prematurely.
+  {
+    bool sensorFound = false;
+    for (int attempt = 1; attempt <= 5 && !sensorFound; attempt++) {
+      if (bme.begin(BME280_ADDR)) {
+        sensorFound = true;
+      } else {
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(COL_RED);
+        tft.drawCentreString("SENSOR ERROR", 160, 100, 4);
+        char retryBuf[28];
+        snprintf(retryBuf, sizeof(retryBuf), "Retrying... (%d/5)", attempt);
+        tft.setTextColor(COL_ACCENT);
+        tft.drawCentreString(retryBuf, 160, 140, 2);
+        esp_task_wdt_reset();
+        delay(1000);
+        // Clear retry line before next attempt overwrites it
+        tft.fillRect(0, 128, 320, 30, COL_BG);
+      }
+    }
+    if (!sensorFound) {
+      tft.fillScreen(COL_BG);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(COL_RED);
+      tft.drawCentreString("SENSOR ERROR", 160, 100, 4);
+      tft.setTextColor(COL_ACCENT);
+      tft.drawCentreString("RESTARTING...", 160, 140, 2);
+      delay(2000);
+      esp_restart();
+    }
+  }
+
+  // Pre-fill history with current altitude-corrected sea-level pressure.
+  // [IMP 10] Validate readings — bme.read*() can return NaN on marginal I2C
+  // hardware immediately after init.  Fall back to sensible defaults so the
+  // history buffer and cached extremes are never seeded with NaN.
+  float rawC = bme.readTemperature();
+  float rawP = bme.readPressure() / 100.0f;
+  if (isnan(rawC)) rawC = 25.0f;          // 25 C — safe indoor default
+  if (isnan(rawP)) rawP = 1013.25f;       // ISA sea-level standard pressure
+  float p_slp = rawP * pow(1.0f - (0.0065f * userAltitude / (rawC + 273.15f)), -5.257f);
+  for (int i = 0; i < HISTORY_SIZE; i++) pressureHistory[i] = p_slp;
+  cachedMinP = cachedMaxP = p_slp;   // [IMP 5] cache valid from boot
+
+  latestTempC = rawC;
+  latestHum   = bme.readHumidity();
+  latestInHg  = p_slp * 0.02953f;
+
+  modeTimer = millis();   // [FIX 9] start rotation timer from boot, not from 0
+  needsStaticRedraw = true;
+  needsGraphRedraw  = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN LOOP
+// ─────────────────────────────────────────────────────────────────────────────
+void loop() {
+  esp_task_wdt_reset();
+  handleSerialCommands();
+
+  unsigned long now = millis();
+
+  // ── Screen rotation every 15 s ────────────────────────────────────────────
+  if (now - modeTimer > 15000) {
+    currentMode ^= 1;
+    modeTimer = now;
+    tft.fillScreen(COL_BG);                              // [THEME 9] deep navy fill
+    needsStaticRedraw = true;
+    needsGraphRedraw  = true;
+  }
+
+  // ── 1-second non-blocking tick ────────────────────────────────────────────
+  if (now - lastTick >= 1000 || lastTick == 0) {
+    lastTick = now;
+
+    float rawC     = bme.readTemperature();
+    float hum      = bme.readHumidity();
+    float rawP_hPa = bme.readPressure() / 100.0f;
+
+    // [IMP 2] Validate readings — I2C glitches or transient BME280 dropouts
+    // return NaN.  Skip accumulation and drawing entirely; lastTick is already
+    // updated so the 1-second cadence is preserved across skips.
+    bool  sensorOk     = !isnan(rawC) && !isnan(hum) && !isnan(rawP_hPa);
+    float inHg_instant = 0.0f;  // declared here so the draw block can see it
+
+    if (sensorOk) {
+      float p_hPa_instant = rawP_hPa * pow(1.0f - (0.0065f * userAltitude / (rawC + 273.15f)), -5.257f);
+      inHg_instant = p_hPa_instant * 0.02953f;
+
+      latestTempC = rawC;
+      latestHum   = hum;
+      latestInHg  = inHg_instant;
+
+      pressureStack += (double)p_hPa_instant;
+      sampleCount++;
+
+      // Commit averaged pressure slot to history buffer
+      if (now - lastReading > graphInterval || lastReading == 0) {
+        float averagedP = (float)(pressureStack / sampleCount);
+        pressureHistory[historyIndex] = averagedP;
+        historyIndex = (historyIndex + 1) % HISTORY_SIZE;
+        if (historyIndex == 0) historyFull = true;
+        pressureStack = 0.0;
+        sampleCount   = 0;
+        lastReading   = now;
+        needsGraphRedraw = true;
+
+        // [IMP 5] Update cached min/max — eliminates O(96) scan in drawGraphContent().
+        int cPts = historyFull ? HISTORY_SIZE : historyIndex;
+        cachedMinP = 9999.0f;
+        cachedMaxP =    0.0f;
+        for (int i = 0; i < cPts; i++) {
+          int idx = historyFull ? (historyIndex + i) % HISTORY_SIZE : i;
+          if (pressureHistory[idx] < cachedMinP) cachedMinP = pressureHistory[idx];
+          if (pressureHistory[idx] > cachedMaxP) cachedMaxP = pressureHistory[idx];
+        }
+      }
+    }  // end sensorOk
+
+    // Confirm overlay expiry — always checked regardless of sensor state
+    if (confirmActive && now >= confirmUntil) {
+      confirmActive = false;
+      tft.fillScreen(COL_BG);
+      needsStaticRedraw = true;
+      needsGraphRedraw  = true;
+    }
+
+    // ── Draw — skipped entirely on bad sensor readings ────────────────────────
+    if (sensorOk) {
+      if (currentMode == 0) {
+        // Dashboard
+        if (needsStaticRedraw) {
+          drawDashboardStatic();
+          needsStaticRedraw = false;
+        }
+        drawDashboardDynamic(rawC, hum, inHg_instant);
+
+      } else {
+        // Graph screen
+        if (needsStaticRedraw) {
+          drawGraphStatic();
+          needsStaticRedraw = false;
+          needsGraphRedraw  = true;  // always redraw content after fresh static layer
+        }
+        if (needsGraphRedraw) {
+          drawGraphContent(rawC, hum);
+          needsGraphRedraw = false;
+        }
+        drawGraphDynamic(inHg_instant, rawC, hum);
+      }
+    }  // end sensorOk draw
+
+    if (confirmActive) drawConfirmOverlay();
+  }
+}
