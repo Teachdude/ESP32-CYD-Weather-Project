@@ -1,31 +1,47 @@
 # ESP32 CYD Weather Station (v5.14)
 
-A lightweight, optimized weather station sketch for the **ESP32-2432S028 (CYD display)**.
-This project reads environmental data and displays it in a smooth, real-time dashboard with graphing support.
+A fast, lightweight weather station built for the **ESP32-2432S028 (CYD display)**.
+Displays real-time environmental data with a clean dashboard and historical graphing.
+
+---
+
+## 📸 Screenshots
+
+*(Add your images here)*
+
+### Dashboard View
+
+![Dashboard](images/dashboard.jpg)
+
+### Graph View
+
+![Graph](images/graph.jpg)
 
 ---
 
 ## 🌤️ Features
 
-* Real-time display of:
+* Real-time readings:
 
   * Temperature
   * Humidity
   * Pressure
   * Dew Point
-  * Comfort level indicator
-* Historical graphing (multiple data points stored and displayed)
-* Dashboard + graph UI modes
-* Optimized for **low memory usage**
+* Comfort level indicator
+* Dual display modes:
 
-  * Eliminates dynamic `String` allocations
-  * Uses `snprintf()` and static buffers
-* Stable sensor initialization with NaN handling
-* Fast display updates (multiple refreshes per second)
+  * Dashboard view
+  * Graph view (historical data)
+* Fast and smooth UI updates
+* Optimized for long-term stability
+
+  * No dynamic `String` usage
+  * Uses fixed buffers (`snprintf`)
+  * NaN sensor protection
 
 ---
 
-## ⚡ Hardware Used
+## ⚡ Hardware Required
 
 * ESP32-2432S028 (CYD display)
 * BME280 environmental sensor (I2C)
@@ -34,32 +50,111 @@ This project reads environmental data and displays it in a smooth, real-time das
 
 ## 📦 Libraries Required
 
-Install these via Arduino IDE Library Manager:
+Install via Arduino IDE Library Manager:
 
+* TFT_eSPI
 * Adafruit BME280
 * Adafruit Unified Sensor
-* TFT_eSPI (configured for CYD display)
 
 ---
 
-## 🔧 Setup
+## 🖥️ TFT_eSPI Configuration (IMPORTANT)
 
-1. Connect the BME280 via I2C:
+⚠️ This project requires a custom TFT_eSPI setup for the CYD display.
 
-   * SDA → ESP32 SDA
-   * SCL → ESP32 SCL
+---
 
-2. Configure `TFT_eSPI` for your CYD display (if not already set up)
+### 📁 Option 1 (Recommended – Use Included File)
 
-3. Open the `.ino` file in Arduino IDE
+Copy this file into your TFT_eSPI library:
 
-4. Select board:
+```
+config/User_Setup_CYD.h
+```
+
+Then edit:
+
+```
+TFT_eSPI/User_Setup_Select.h
+```
+
+Add:
+
+```cpp
+#include <User_Setup_CYD.h>
+```
+
+---
+
+### 📁 Option 2 (Manual Setup)
+
+Create this file:
+
+```
+TFT_eSPI/User_Setup_CYD.h
+```
+
+Paste the following:
+
+```cpp
+#define USER_SETUP_INFO "CYD ESP32-2432S028"
+
+#define ILI9341_DRIVER
+
+#define TFT_WIDTH  240
+#define TFT_HEIGHT 320
+
+#define TFT_MISO 12
+#define TFT_MOSI 13
+#define TFT_SCLK 14
+#define TFT_CS   15
+#define TFT_DC    2
+#define TFT_RST   4
+
+#define TFT_BL   21
+#define TFT_BACKLIGHT_ON HIGH
+
+#define SPI_FREQUENCY  40000000
+
+#define LOAD_GLCD
+#define LOAD_FONT2
+#define LOAD_FONT4
+#define LOAD_FONT6
+#define LOAD_FONT7
+#define LOAD_FONT8
+#define LOAD_GFXFF
+
+#define SMOOTH_FONT
+```
+
+---
+
+### 🧪 Verify Setup
+
+Run this example from TFT_eSPI:
+
+```
+Read_User_Setup
+```
+
+Check Serial output to confirm correct configuration.
+
+---
+
+## 🔧 Installation
+
+1. Clone or download this repository
+2. Open the `.ino` file in Arduino IDE:
+
+   ```
+   CYD_Weather_Station/CYD_Weather_Station_ver5_14.ino
+   ```
+3. Select board:
 
    ```
    ESP32 Dev Module
    ```
-
-5. Upload to your device
+4. Upload to your ESP32
 
 ---
 
@@ -67,67 +162,59 @@ Install these via Arduino IDE Library Manager:
 
 ### Dashboard View
 
-* Live readings
-* Comfort level indicator
-* Clean, minimal UI
+* Live sensor readings
+* Clean layout
+* Comfort indicator
 
 ### Graph View
 
 * Historical trends
 * Min/Max tracking
-* Smooth updates
-
----
-
-## 🧠 Optimization Highlights (v5.14)
-
-This version focuses heavily on performance and memory stability:
-
-* **Zero heap fragmentation during runtime**
-* Replaced all `String` usage in display code
-* Faster parsing for commands (no dynamic allocation)
-* Improved reliability on startup (NaN sensor protection)
-
-These changes make the sketch ideal for **long-term uptime projects**.
-
----
-
-## 🌡️ Units
-
-The sketch supports switching between:
-
-* Celsius (°C)
-* Fahrenheit (°F)
-
-Handled internally with efficient parsing (no memory overhead).
+* Smooth scrolling updates
 
 ---
 
 ## 📈 Data Handling
 
-* Maintains a rolling buffer of historical readings
-* Used for graph rendering and min/max calculations
-* Designed to avoid corruption from invalid sensor values
+* Rolling buffer stores recent readings
+* Used for graph rendering
+* Filters invalid sensor values (NaN protection)
 
 ---
 
-## 🚀 Future Improvements (Ideas)
+## 🌡️ Units
 
-* WiFi weather upload (MQTT / HTTP)
+Supports:
+
+* Celsius (°C)
+* Fahrenheit (°F)
+
+Efficient conversion without extra memory usage.
+
+---
+
+## 🚀 Future Improvements
+
+* WiFi connectivity (MQTT / HTTP)
 * SD card logging
-* Touch UI enhancements
+* Touchscreen UI
 * Multiple sensor support
 
 ---
 
 ## 📄 License
 
-Feel free to use, modify, and share this project.
+Free to use, modify, and share.
 
 ---
 
 ## 🙌 Credits
 
-Created as a hobby project to explore ESP32 performance, UI design, and efficient embedded coding.
+Created as a hobby project focused on:
+
+* ESP32 performance optimization
+* Embedded UI design
+* Reliable long-term operation
 
 ---
+
