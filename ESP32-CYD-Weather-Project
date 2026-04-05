@@ -1,5 +1,23 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Weather Station — ESP32-2432S028 (CYD)  ·  "Cyber Lime" Edition v5.14
+// Weather Station — ESP32-2432S028 (CYD)  ·  "Cyber Lime" Edition v5.15
+//
+// Changes vs v5.14:
+//   [FIX 19] latestHum NaN-validated in setup() pre-fill.
+//            bme.readHumidity() was called without an isnan() guard, matching
+//            the protection added to temperature and pressure in IMP 10.  A NaN
+//            return on the first read would leave latestHum = NaN, causing a
+//            STATUS command sent within the first loop tick to print "nan" for
+//            humidity.  Fix: clamped to 50.0 % (a safe neutral default) if NaN.
+//   [FIX 20] UNIT= parser guards against an empty argument.
+//            The IMP 9 change to cmd[5] == 'C' reads past the end of the string
+//            if the user sends "UNIT=" with nothing after the '='.  The null
+//            terminator '\0' != 'C', so useCelsius would silently become false
+//            with no feedback.  Fix: the handler now checks cmd.length() > 5
+//            before acting, and prints a warning if the argument is missing.
+//   [FIX 21] getComfortLevel() added to FORWARD DECLARATIONS.
+//            getComfortColor() was declared but getComfortLevel() was not,
+//            leaving the forward-declaration block inconsistent.  The return
+//            type const char* (changed in IMP 7) is now also documented there.
 //
 // Changes vs v5.13:
 //   [IMP 7]  getComfortLevel() return type changed from String to const char*.
@@ -334,15 +352,16 @@ bool needsGraphRedraw  = true;   // [FIX 4]
 // ─────────────────────────────────────────────────────────────────────────────
 // FORWARD DECLARATIONS
 // ─────────────────────────────────────────────────────────────────────────────
-void     drawDashboardStatic();
-void     drawDashboardDynamic(float rawC, float h, float p);
-void     drawGraphStatic();
-void     drawGraphContent(float rawC, float hum);
-void     drawGraphDynamic(float currentInHg, float rawC, float hum);
-void     drawConfirmOverlay();
-void     drawBreathingDot();
-void     drawTrendArrow(float delta, int cx, int cy);
-uint16_t getComfortColor(float dewC);
+void        drawDashboardStatic();
+void        drawDashboardDynamic(float rawC, float h, float p);
+void        drawGraphStatic();
+void        drawGraphContent(float rawC, float hum);
+void        drawGraphDynamic(float currentInHg, float rawC, float hum);
+void        drawConfirmOverlay();
+void        drawBreathingDot();
+void        drawTrendArrow(float delta, int cx, int cy);
+const char* getComfortLevel(float dewC);   // [IMP 7] returns flash literal, no heap
+uint16_t    getComfortColor(float dewC);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONFIRMATION OVERLAY HELPER
@@ -407,12 +426,18 @@ void handleSerialCommands() {
     needsGraphRedraw  = true;
   }
   else if (cmd.startsWith("UNIT=")) {
-    // [IMP 9] Direct character check — no String allocation for a single char.
-    useCelsius = (cmd[5] == 'C');
-    prefs.putBool("celsius", useCelsius);
-    Serial.printf(">> UNIT UPDATED: %s\n", useCelsius ? "Celsius" : "Fahrenheit");
-    showConfirm(useCelsius ? "UNIT = C  OK" : "UNIT = F  OK");
-    needsStaticRedraw = true;
+    // [FIX 20] Guard against "UNIT=" with no argument — cmd[5] would read the
+    // null terminator and silently set Fahrenheit with no user feedback.
+    if (cmd.length() < 6) {
+      Serial.println(">> UNIT= ERROR: argument missing (use UNIT=C or UNIT=F)");
+    } else {
+      // [IMP 9] Direct character check — no String allocation for a single char.
+      useCelsius = (cmd[5] == 'C');
+      prefs.putBool("celsius", useCelsius);
+      Serial.printf(">> UNIT UPDATED: %s\n", useCelsius ? "Celsius" : "Fahrenheit");
+      showConfirm(useCelsius ? "UNIT = C  OK" : "UNIT = F  OK");
+      needsStaticRedraw = true;
+    }
   }
   else if (cmd.startsWith("BRT=")) {
     int pct = cmd.substring(4).toInt();
@@ -889,6 +914,7 @@ void setup() {
 
   latestTempC = rawC;
   latestHum   = bme.readHumidity();
+  if (isnan(latestHum)) latestHum = 50.0f;  // [FIX 19] 50 % — safe neutral default
   latestInHg  = p_slp * 0.02953f;
 
   modeTimer = millis();   // [FIX 9] start rotation timer from boot, not from 0
