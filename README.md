@@ -8,13 +8,10 @@ A polished, feature-rich indoor weather station for the **ESP32-2432S028** ("Che
 
 ## Screenshots
 
-> _Add your own photos here. Replace the placeholders below with actual images of your build._
 
 | Dashboard Screen | Pressure Trend Graph |
 |:---:|:---:|
 | ![Dashboard](images/dashboard.jpg) | ![Graph](images/graph.jpg) |
-
-_To add images: create an `images/` folder in your repository, place your photos there, and update the paths above._
 
 ---
 
