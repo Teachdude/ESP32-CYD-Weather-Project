@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/26485663/README.md)
 # CYD Weather Station — "Cyber Lime" Edition
 
 A polished, feature-rich indoor weather station for the **ESP32-2432S028** ("Cheap Yellow Display") driven by a **BME280** environmental sensor. Displays real-time temperature, humidity, barometric pressure, dew point, comfort level, and a long-term pressure trend graph — all on the built-in 2.8″ ILI9341 TFT display.
@@ -72,6 +71,79 @@ BME280 Module          CYD Board
 ```
 
 > **I2C address:** Ensure your BME280's SDO pin is pulled LOW (connected to GND). This sets the I2C address to `0x76`, which the sketch expects. If your module has SDO pulled HIGH, it will appear at `0x77` and the sketch will show SENSOR ERROR. Either pull SDO LOW or change `BME280_ADDR` to `0x77` in the sketch.
+
+---
+
+## Flashing the Pre-compiled Binary
+
+If you just want to run the firmware without installing Arduino IDE or any libraries, use one of the pre-compiled binaries from the `binaries/` folder.
+
+### Which binary do I need?
+
+The ESP32-2432S028 was produced in two hardware variants with opposite display panel polarities. Flash the wrong one and the display will look washed out or show incorrect colours.
+
+| File | Use when |
+|---|---|
+| `CYD_Weather_Station_v5.15_INVERTED.bin` | Display looks correct with this — try this one first |
+| `CYD_Weather_Station_v5.15_NORMAL.bin` | Use this if the INVERTED version looks wrong |
+
+There is no risk in trying both — just reflash if the first one looks off. Neither binary will damage your hardware.
+
+### Method 1 — ESP Web Flasher (easiest, no software to install)
+
+Espressif provides a browser-based flash tool that works entirely in Google Chrome or Microsoft Edge — no drivers or software required.
+
+1. Connect your CYD to your PC via USB
+2. Open **[https://espressif.github.io/esptool-js/](https://espressif.github.io/esptool-js/)** in Chrome or Edge
+3. Click **Connect** and select your CYD's COM port from the popup
+4. Set the flash address to **`0x0`**
+5. Click **Choose File** and select the `.bin` file
+6. Click **Program**
+7. Wait for the progress bar to complete, then press the **RST** button on your CYD
+
+### Method 2 — ESP32 Flash Download Tool (Windows GUI)
+
+Espressif's official Windows GUI tool is straightforward and reliable.
+
+1. Download the **Flash Download Tool** from [https://www.espressif.com/en/support/download/other-tools](https://www.espressif.com/en/support/download/other-tools)
+2. Run the tool and select **ESP32** as the chip type and **Develop** as the work mode
+3. In the first row, click the **...** button and browse to your `.bin` file
+4. Set the address field next to it to **`0x0`**
+5. Make sure the checkbox to the left of the row is **ticked**
+6. Set **COM** to your CYD's port and **BAUD** to `921600`
+7. Click **START** and wait for the `FINISH` message
+8. Press the **RST** button on your CYD
+
+### Method 3 — esptool.py (command line, all platforms)
+
+If you have Python installed, `esptool.py` is the most reliable method and works on Windows, macOS, and Linux.
+
+**Install esptool:**
+```bash
+pip install esptool
+```
+
+**Flash the binary** (replace `COM3` with your actual port — on macOS/Linux it will be something like `/dev/ttyUSB0` or `/dev/tty.usbserial-0001`):
+
+```bash
+esptool.py --chip esp32 --port COM3 --baud 921600 write_flash 0x0 CYD_Weather_Station_v5.15_INVERTED.bin
+```
+
+**Full example with erase** (use this if the device behaves unexpectedly after flashing):
+```bash
+esptool.py --chip esp32 --port COM3 --baud 921600 erase_flash
+esptool.py --chip esp32 --port COM3 --baud 921600 write_flash 0x0 CYD_Weather_Station_v5.15_INVERTED.bin
+```
+
+### After flashing
+
+Once flashed and running, all settings (altitude, interval, unit, brightness) are configured via the serial command interface — no reflashing required. Connect a serial monitor at **115200 baud** and use the commands listed in the [Serial Commands](#serial-commands) section. The first thing you should set is your local altitude:
+
+```
+ALT=145
+```
+
+Replace `145` with your actual altitude in metres. See the [Configuration](#configuration) section for how to find this value.
 
 ---
 
